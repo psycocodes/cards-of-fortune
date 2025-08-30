@@ -1,17 +1,30 @@
 import GameWrapper from "@/components/GameWrapper";
+import type { Metadata } from "next";
 
-interface GamePageProps {
-  params: {
-    id: string;
+type Params = Promise<{ slug: string }>
+type SearchParams = Promise<{ [key: string]: string | string[] | undefined }>
+ 
+export async function generateMetadata(props: {
+  params: Params
+  searchParams: SearchParams
+}): Promise<Metadata> {
+  const gameId = (await props.params).slug;
+  return {
+    title: `Play Game - ${gameId}`,
+    description: `Enjoy playing game ${gameId}.`,
   };
 }
 
-export default async function GamePage({ params }: GamePageProps) {
+export default async function GamePage(props: {
+  params: Params
+  searchParams: SearchParams
+}) {
+  const gameId = (await props.params).slug;
   return (
-    <div className="w-screen h-screen bg-black">
+    <main className="w-screen h-screen bg-black">
       <div id="unity-container" className="w-full h-full">
-        <GameWrapper gameId={params.id} />
+        <GameWrapper gameId={gameId} />
       </div>
-    </div>
+    </main>
   );
 }

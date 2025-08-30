@@ -3,7 +3,6 @@
  * @returns {boolean} True if the device is identified as mobile, otherwise false.
  */
 export const isMobileDevice = (): boolean => {
-  // This check is performed on the client-side, so we need to ensure 'window' is available.
   if (typeof window === "undefined") {
     return false;
   }
