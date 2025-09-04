@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
+import Providers from "@/components/WalletProviders";
+import "@rainbow-me/rainbowkit/styles.css";
+
 
 const calebMono = localFont({
   src: "../public/fonts/CSCalebMono-Regular.ttf",
@@ -19,7 +22,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${calebMono.variable} antialiased`}>{children}</body>
+      <body className={`${calebMono.variable} antialiased`}>
+        <Providers>{children}</Providers>
+      </body>
     </html>
   );
 }
