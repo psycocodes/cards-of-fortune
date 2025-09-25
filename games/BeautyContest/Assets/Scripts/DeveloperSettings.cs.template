@@ -1,0 +1,14 @@
+// Developer-specific settings - Copy this to DeveloperSettings.cs and add your keys
+// DO NOT COMMIT DeveloperSettings.cs TO VERSION CONTROL
+
+public static class DeveloperSettings 
+{
+    // Replace with your own test private key (get test ETH from a Sepolia faucet)
+    public const string PRIVATE_KEY = "YOUR_PRIVATE_KEY_HERE";
+    
+    // Replace with your own Alchemy/Infura RPC URL  
+    public const string RPC_URL = "https://eth-sepolia.g.alchemy.com/v2/YOUR_API_KEY_HERE";
+    
+    // Contract address (shared)
+    public const string CONTRACT_ADDRESS = "0x6a821521b3C6a3E6298E222082c927bFdE0ddA38";
+}
