@@ -8,20 +8,37 @@ public class PlayerController : MonoBehaviourPun
     [Header("UI References")]
     public TextMeshProUGUI playerNameText;
     public TextMeshProUGUI playerStatusText;
+    public TextMeshProUGUI playerScoreText; // NEW: Player score display
     public Image backgroundImage;
     
     [Header("Visual States")]
     public Color activeColor = Color.white;
     public Color eliminatedColor = Color.red;
     public Color waitingColor = Color.yellow;
+    public Color submittedColor = Color.green; // NEW: Submitted state color
     
     private bool isEliminated = false;
     private bool hasSubmittedGuess = false;
     private int currentGuess = 0;
     private string walletAddress = "";
+    private string playerDisplayName = "";
+    private int playerScore = 100; // NEW: Starting score
+    private int playerNumber = 0; // NEW: Player number (0, 1, 2, etc.)
     
     void Start()
     {
+        // Get player number from ActorNumber (0-based for display)
+        if (photonView.Owner != null)
+        {
+            playerNumber = photonView.Owner.ActorNumber - 1; // Convert to 0-based
+            playerDisplayName = $"Player {playerNumber}";
+        }
+        else
+        {
+            playerNumber = 0;
+            playerDisplayName = "Player ?";
+        }
+        
         // Initialize player data
         if (photonView.IsMine)
         {
@@ -33,6 +50,8 @@ public class PlayerController : MonoBehaviourPun
             // This is a remote player
             InitializeRemotePlayer();
         }
+        
+        Debug.Log($"PlayerController started for {playerDisplayName} (Actor: {photonView.Owner?.ActorNumber})");
     }
     
     void InitializeLocalPlayer()
@@ -47,11 +66,17 @@ public class PlayerController : MonoBehaviourPun
         }
         else
         {
-            walletAddress = "Player_" + photonView.Owner.ActorNumber;
+            walletAddress = playerDisplayName;
         }
         
-        // Set the name for this player across network
-        photonView.RPC("SetPlayerInfo", RpcTarget.All, walletAddress, false);
+        Debug.Log($"Local player initialized: {playerDisplayName} with wallet: {walletAddress}");
+        UpdateUI();
+        
+        // Send player info to all clients immediately
+        if (photonView != null)
+        {
+            photonView.RPC("SetPlayerInfo", RpcTarget.All, walletAddress, false, playerScore, playerDisplayName);
+        }
     }
     
     void InitializeRemotePlayer()
@@ -59,12 +84,14 @@ public class PlayerController : MonoBehaviourPun
         // Remote players will get their info via RPC
         if (photonView.Owner != null)
         {
-            walletAddress = photonView.Owner.NickName ?? ("Player_" + photonView.Owner.ActorNumber);
+            walletAddress = photonView.Owner.NickName ?? playerDisplayName;
         }
         else
         {
-            walletAddress = "Remote Player";
+            walletAddress = playerDisplayName;
         }
+        
+        Debug.Log($"Remote player initialized: {playerDisplayName}");
         UpdateUI();
     }
     
@@ -85,11 +112,31 @@ public class PlayerController : MonoBehaviourPun
     }
     
     [PunRPC]
-    void SetPlayerInfo(string playerWallet, bool eliminated)
+    void SetPlayerInfo(string playerWallet, bool eliminated, int score, string displayName)
     {
         walletAddress = playerWallet;
         isEliminated = eliminated;
-        UpdateUI();
+        playerScore = score;
+        playerDisplayName = displayName;
+        
+        Debug.Log($"SetPlayerInfo RPC received: {displayName}, Score: {score}, Eliminated: {eliminated}");
+        
+        // Use safe UI update for WebGL
+        WebGLContextManager.SafeUIUpdate(() => {
+            UpdateUI();
+        });
+    }
+    
+    [PunRPC]
+    void UpdatePlayerScore(int newScore)
+    {
+        playerScore = newScore;
+        Debug.Log($"Score updated for {playerDisplayName}: {newScore}");
+        
+        // Use safe UI update for WebGL
+        WebGLContextManager.SafeUIUpdate(() => {
+            UpdateUI();
+        });
     }
     
     [PunRPC]
@@ -97,35 +144,73 @@ public class PlayerController : MonoBehaviourPun
     {
         hasSubmittedGuess = submitted;
         currentGuess = guess;
-        UpdateUI();
+        
+        string statusMessage = submitted ? $"Submitted guess: {guess}" : "Waiting for guess...";
+        Debug.Log($"SetGuessStatus RPC for {playerDisplayName}: {statusMessage}");
+        
+        // Use safe UI update for WebGL
+        WebGLContextManager.SafeUIUpdate(() => {
+            UpdateUI();
+        });
     }
     
     [PunRPC]
     void EliminatePlayer()
     {
         isEliminated = true;
-        UpdateUI();
+        
+        // Use safe UI update for WebGL
+        WebGLContextManager.SafeUIUpdate(() => {
+            UpdateUI();
+        });
+        
         Debug.Log($"Player {walletAddress} has been eliminated!");
     }
     
     public void SubmitGuess(int guess)
     {
-        if (!photonView.IsMine || isEliminated || hasSubmittedGuess) return;
+        if (!photonView.IsMine || isEliminated || hasSubmittedGuess) 
+        {
+            Debug.LogWarning($"Cannot submit guess: IsMine={photonView.IsMine}, Eliminated={isEliminated}, AlreadySubmitted={hasSubmittedGuess}");
+            return;
+        }
         
         currentGuess = guess;
         hasSubmittedGuess = true;
         
-        // Notify all clients about this guess submission
-        photonView.RPC("SetGuessStatus", RpcTarget.All, true, guess);
+        Debug.Log($"Local player {playerDisplayName} submitting guess: {guess}");
+        
+        // Update UI immediately for local player
+        UpdateUI();
+        
+        // Use WebGL-safe RPC call
+        bool rpcSent = WebGLContextManager.SafeRPC(photonView, "SetGuessStatus", RpcTarget.All, true, guess);
+        
+        if (!rpcSent)
+        {
+            // Fallback for WebGL context loss - try direct call
+            Debug.LogWarning("SafeRPC failed, trying direct RPC call");
+            try
+            {
+                photonView.RPC("SetGuessStatus", RpcTarget.All, true, guess);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"Direct RPC also failed: {ex.Message}");
+            }
+        }
         
         // Send guess to GameManager
         GameManager gameManager = FindObjectOfType<GameManager>();
         if (gameManager != null)
         {
+            Debug.Log($"Sending guess to GameManager: Player {photonView.Owner.ActorNumber}, Guess: {guess}");
             gameManager.ReceivePlayerGuess(photonView.Owner.ActorNumber, guess);
         }
-        
-        Debug.Log($"Submitted guess: {guess}");
+        else
+        {
+            Debug.LogError("GameManager not found!");
+        }
     }
     
     public void ResetForNewRound()
@@ -135,47 +220,72 @@ public class PlayerController : MonoBehaviourPun
         hasSubmittedGuess = false;
         currentGuess = 0;
         
-        // Update status across network
-        photonView.RPC("SetGuessStatus", RpcTarget.All, false, 0);
+        // Use WebGL-safe RPC call
+        WebGLContextManager.SafeRPC(photonView, "SetGuessStatus", RpcTarget.All, false, 0);
     }
     
     void UpdateUI()
     {
-        // Update player name (shortened wallet)
+        // Skip UI updates if running in WebGL and context is potentially lost
+        if (Application.platform == RuntimePlatform.WebGLPlayer)
+        {
+            // Use try-catch for WebGL UI operations
+            try
+            {
+                UpdateUIInternal();
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"UI update failed (WebGL context issue?): {ex.Message}");
+                // Don't crash the game, just log the warning
+            }
+        }
+        else
+        {
+            UpdateUIInternal();
+        }
+    }
+    
+    void UpdateUIInternal()
+    {
+        // Update player name - now shows "Player 0", "Player 1", etc.
         if (playerNameText != null)
         {
-            if (walletAddress.Length > 10)
-                playerNameText.text = walletAddress.Substring(0, 6) + "..." + walletAddress.Substring(walletAddress.Length - 4);
-            else
-                playerNameText.text = walletAddress;
+            playerNameText.text = playerDisplayName;
         }
         
-        // Update status text
+        // Update player score
+        if (playerScoreText != null)
+        {
+            playerScoreText.text = $"Score: {playerScore}";
+        }
+        
+        // Update status text with more detailed information
         if (playerStatusText != null)
         {
             if (isEliminated)
             {
-                playerStatusText.text = "ELIMINATED";
+                playerStatusText.text = "❌ ELIMINATED";
             }
             else if (hasSubmittedGuess)
             {
-                playerStatusText.text = $"Guess: {currentGuess}";
+                playerStatusText.text = $"✅ Submitted: {currentGuess}";
             }
             else
             {
-                playerStatusText.text = "Waiting...";
+                playerStatusText.text = "⏳ Thinking...";
             }
         }
         
-        // Update background color
+        // Update background color based on state
         if (backgroundImage != null)
         {
             if (isEliminated)
                 backgroundImage.color = eliminatedColor;
             else if (hasSubmittedGuess)
-                backgroundImage.color = waitingColor;
+                backgroundImage.color = submittedColor; // Green for submitted
             else
-                backgroundImage.color = activeColor;
+                backgroundImage.color = activeColor; // White for waiting
         }
     }
     
@@ -185,13 +295,26 @@ public class PlayerController : MonoBehaviourPun
     public int GetCurrentGuess => currentGuess;
     public string GetWalletAddress => walletAddress;
     public int GetActorNumber => photonView.Owner.ActorNumber;
+    public int GetPlayerScore => playerScore;
+    public string GetPlayerDisplayName => playerDisplayName;
+    
+    // Called by GameManager to update player score
+    public void UpdateScore(int newScore)
+    {
+        if (photonView.IsMine)
+        {
+            // Use WebGL-safe RPC call
+            WebGLContextManager.SafeRPC(photonView, "UpdatePlayerScore", RpcTarget.All, newScore);
+        }
+    }
     
     // Called by GameManager when player is eliminated
     public void Eliminate()
     {
         if (photonView.IsMine)
         {
-            photonView.RPC("EliminatePlayer", RpcTarget.All);
+            // Use WebGL-safe RPC call
+            WebGLContextManager.SafeRPC(photonView, "EliminatePlayer", RpcTarget.All);
         }
     }
 }

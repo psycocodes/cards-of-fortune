@@ -4,6 +4,7 @@ using Photon.Pun;
 using TMPro;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 
 public class GameManager : MonoBehaviourPun
 {
@@ -17,7 +18,8 @@ public class GameManager : MonoBehaviourPun
     
     [Header("Game Settings")]
     public float roundDuration = 30f;
-    public float resultDisplayTime = 5f;
+    public float resultDisplayTime = 10f; // Increased from 5f to 10f
+    public float resultProcessingTime = 3f; // NEW: Time to process results before showing
     
     [Header("Game Rules")]
     public string[] roundInstructions = {
@@ -130,7 +132,14 @@ public class GameManager : MonoBehaviourPun
         ResetPlayersForNewRound();
         
         // Notify all clients about new round
-        photonView.RPC("OnNewRoundStarted", RpcTarget.All, currentRound);
+        if (photonView != null)
+        {
+            photonView.RPC("OnNewRoundStarted", RpcTarget.All, currentRound);
+        }
+        else
+        {
+            OnNewRoundStarted(currentRound);
+        }
         
         roundInProgress = true;
     }
@@ -155,7 +164,12 @@ public class GameManager : MonoBehaviourPun
             submitButton.interactable = !isEliminated;
             
         if (resultText != null)
-            resultText.text = isEliminated ? "You are eliminated" : $"Round {round} - Make your guess!";
+        {
+            if (isEliminated)
+                resultText.text = "❌ You are eliminated - spectating...";
+            else
+                resultText.text = $"🎮 Round {round} started!\nMake your guess and submit!";
+        }
     }
     
     void ResetPlayersForNewRound()
@@ -175,56 +189,84 @@ public class GameManager : MonoBehaviourPun
         if (!PhotonNetwork.IsMasterClient || !roundInProgress) return;
         
         // Check if player is eliminated
-        if (eliminatedPlayers.Contains(playerActorNumber)) return;
+        if (eliminatedPlayers.Contains(playerActorNumber)) 
+        {
+            Debug.LogWarning($"❌ Ignoring guess from eliminated player {playerActorNumber}");
+            return;
+        }
         
         // Store the guess
         currentRoundGuesses[playerActorNumber] = guess;
         
-        Debug.Log($"Received guess from player {playerActorNumber}: {guess}");
+        Debug.Log($"📥 Received guess from player {playerActorNumber}: {guess}");
+        
+        // Update UI to show submission count
+        int activePlayers = GetActivePlayerCount();
+        if (resultText != null)
+            resultText.text = $"Round {currentRound}: {currentRoundGuesses.Count}/{activePlayers} players submitted";
+        
+        Debug.Log($"📊 Current submissions: {currentRoundGuesses.Count}/{activePlayers}");
         
         // Check if all active players have submitted
-        int activePlayers = GetActivePlayerCount();
         if (currentRoundGuesses.Count >= activePlayers)
         {
-            Debug.Log("All players have submitted their guesses!");
-            ProcessRoundResults();
+            Debug.Log("✅ All players have submitted their guesses!");
+            roundInProgress = false; // Stop the timer
+            
+            // Brief pause to show "All submitted" then process
+            if (resultText != null)
+                resultText.text = "All players submitted! Processing results...";
+                
+            // Process results after brief delay
+            Invoke(nameof(ProcessRoundResults), resultProcessingTime);
         }
     }
     
     void ProcessRoundResults()
     {
-        if (!PhotonNetwork.IsMasterClient || !roundInProgress) return;
+        if (!PhotonNetwork.IsMasterClient) return;
         
         roundInProgress = false;
         
-        Debug.Log("Processing round results...");
+        Debug.Log($"🎯 Processing round {currentRound} results...");
         
         // Calculate average and target
-        if (currentRoundGuesses.Count > 0)
+        float sum = 0f;
+        foreach (var guess in currentRoundGuesses.Values)
         {
-            lastRoundAverage = (float)currentRoundGuesses.Values.Average();
-            lastRoundTarget = lastRoundAverage * 0.8f;
-            
-            // Find closest guess to target
-            int closestPlayerActorNumber = -1;
-            float closestDistance = float.MaxValue;
-            
-            foreach (var kvp in currentRoundGuesses)
+            sum += guess;
+        }
+        
+        lastRoundAverage = sum / currentRoundGuesses.Count;
+        lastRoundTarget = lastRoundAverage * 0.8f; // 80% of average
+        
+        Debug.Log($"📊 Round {currentRound} Results:");
+        Debug.Log($"📊 Average: {lastRoundAverage:F2}, Target: {lastRoundTarget:F2}");
+        
+        // Find closest player (winner)
+        int closestPlayerActorNumber = -1;
+        float closestDistance = float.MaxValue;
+        
+        foreach (var kvp in currentRoundGuesses)
+        {
+            float distance = Mathf.Abs(kvp.Value - lastRoundTarget);
+            Debug.Log($"📊 Player {kvp.Key}: Guess={kvp.Value}, Distance={distance:F2}");
+            if (distance < closestDistance)
             {
-                float distance = Mathf.Abs(kvp.Value - lastRoundTarget);
-                if (distance < closestDistance)
-                {
-                    closestDistance = distance;
-                    closestPlayerActorNumber = kvp.Key;
-                }
+                closestDistance = distance;
+                closestPlayerActorNumber = kvp.Key;
             }
-            
-            lastRoundWinner = closestPlayerActorNumber;
-            
-            // Find player to eliminate (furthest from target)
-            int eliminatePlayerActorNumber = -1;
+        }
+        
+        lastRoundWinner = closestPlayerActorNumber;
+        
+        // Find player to eliminate (furthest from target) - ONLY if more than 2 players
+        int totalActivePlayers = GetActivePlayerCount();
+        int eliminatePlayerActorNumber = -1;
+        
+        if (totalActivePlayers > 2)
+        {
             float furthestDistance = 0f;
-            
             foreach (var kvp in currentRoundGuesses)
             {
                 float distance = Mathf.Abs(kvp.Value - lastRoundTarget);
@@ -249,17 +291,89 @@ public class GameManager : MonoBehaviourPun
                     if (player.GetActorNumber == eliminatePlayerActorNumber)
                     {
                         player.Eliminate();
+                        Debug.Log($"❌ Player {eliminatePlayerActorNumber} eliminated!");
                         break;
                     }
                 }
             }
         }
+        else if (totalActivePlayers == 2)
+        {
+            // With only 2 players, the game should end after this round
+            // Winner is the one closest to target
+            Debug.Log($"🏆 Final round! Winner: Player {closestPlayerActorNumber}");
+            
+            // End the game immediately
+            PlayerController[] players = FindObjectsOfType<PlayerController>();
+            string winnerWallet = "";
+            foreach (PlayerController player in players)
+            {
+                if (player.GetActorNumber == closestPlayerActorNumber)
+                {
+                    winnerWallet = player.GetWalletAddress;
+                    break;
+                }
+            }
+            
+            // Send results first, then end game
+            photonView.RPC("OnRoundResults", RpcTarget.All, lastRoundAverage, lastRoundTarget, lastRoundWinner, -1);
+            
+            // End game after showing results
+            Invoke(nameof(EndGameWithWinner), resultDisplayTime);
+            return;
+        }
         
         // Send results to all clients
         photonView.RPC("OnRoundResults", RpcTarget.All, lastRoundAverage, lastRoundTarget, lastRoundWinner, lastRoundEliminated);
         
-        // Check win condition
+        // Check win condition after brief display
         Invoke(nameof(CheckWinCondition), resultDisplayTime);
+    }
+
+    // Helper method to end the game with a specific winner
+    void EndGameWithWinner()
+    {
+        if (!PhotonNetwork.IsMasterClient) return;
+
+        gameInProgress = false;
+        roundInProgress = false;
+
+        // Find winner details
+        PlayerController[] players = FindObjectsOfType<PlayerController>();
+        string winnerWallet = "";
+        string winnerName = GetPlayerDisplayName(lastRoundWinner);
+
+        foreach (PlayerController player in players)
+        {
+            if (player.GetActorNumber == lastRoundWinner)
+            {
+                winnerWallet = player.GetWalletAddress;
+                break;
+            }
+        }
+
+        Debug.Log($"🎉 GAME OVER! Winner: {winnerName} ({winnerWallet})");
+
+        // Notify all clients about game end
+        photonView.RPC("OnGameEnded", RpcTarget.All, lastRoundWinner, winnerWallet);
+    }
+
+    // Helper method to get player display name
+    string GetPlayerDisplayName(int actorNumber)
+    {
+        if (actorNumber == -1) return "Unknown";
+
+        PlayerController[] players = FindObjectsOfType<PlayerController>();
+        foreach (PlayerController player in players)
+        {
+            if (player.GetActorNumber == actorNumber)
+            {
+                string displayName = player.GetPlayerDisplayName();
+                return !string.IsNullOrEmpty(displayName) ? displayName : $"Player {actorNumber}";
+            }
+        }
+
+        return $"Player {actorNumber}";
     }
     
     [PunRPC]
@@ -270,25 +384,35 @@ public class GameManager : MonoBehaviourPun
         lastRoundWinner = winnerActorNumber;
         lastRoundEliminated = eliminatedActorNumber;
         
-        // Display results
+        // Display results with better formatting
         if (resultText != null)
         {
-            string resultsMessage = $"Round {currentRound} Results:\n" +
-                                  $"Average: {average:F2}\n" +
-                                  $"Target (80%): {target:F2}\n" +
-                                  $"Winner: Player {winnerActorNumber}\n" +
-                                  $"Eliminated: Player {eliminatedActorNumber}";
+            string winnerName = GetPlayerDisplayName(winnerActorNumber);
+            string resultsMessage = $"🎯 ROUND {currentRound} RESULTS 🎯\n" +
+                                  $"Average: {average:F1}\n" +
+                                  $"Target (80%): {target:F1}\n" +
+                                  $"🏆 Winner: {winnerName}";
+                                  
+            if (eliminatedActorNumber != -1)
+            {
+                string eliminatedName = GetPlayerDisplayName(eliminatedActorNumber);
+                resultsMessage += $"\n❌ Eliminated: {eliminatedName}";
+            }
+            else
+            {
+                resultsMessage += $"\n🎉 FINAL WINNER: {winnerName}!";
+            }
                                   
             resultText.text = resultsMessage;
         }
         
-        // Disable input during results
+        // Disable input during results display
         if (guessInput != null)
             guessInput.interactable = false;
         if (submitButton != null)
             submitButton.interactable = false;
             
-        Debug.Log($"Round results - Average: {average:F2}, Target: {target:F2}, Winner: {winnerActorNumber}, Eliminated: {eliminatedActorNumber}");
+        Debug.Log($"📊 Round results displayed - Average: {average:F2}, Target: {target:F2}, Winner: {winnerActorNumber}, Eliminated: {eliminatedActorNumber}");
     }
     
     void CheckWinCondition()
@@ -314,7 +438,14 @@ public class GameManager : MonoBehaviourPun
             
             if (winner != null)
             {
-                photonView.RPC("OnGameEnded", RpcTarget.All, winner.GetActorNumber, winner.GetWalletAddress);
+                if (photonView != null)
+                {
+                    photonView.RPC("OnGameEnded", RpcTarget.All, winner.GetActorNumber, winner.GetWalletAddress);
+                }
+                else
+                {
+                    OnGameEnded(winner.GetActorNumber, winner.GetWalletAddress);
+                }
             }
         }
         else
@@ -330,36 +461,63 @@ public class GameManager : MonoBehaviourPun
         gameInProgress = false;
         roundInProgress = false;
         
+        string displayName = GetPlayerName(winnerActorNumber);
+        
         if (resultText != null)
         {
             resultText.text = $"🎉 GAME OVER! 🎉\n" +
-                             $"Winner: {winnerWallet}\n" +
-                             $"Congratulations!";
+                             $"Winner: {displayName}\n" +
+                             $"🏆 Congratulations! 🏆\n" +
+                             $"Prize pool is being transferred...";
         }
         
         Debug.Log($"Game ended! Winner: {winnerWallet} (Actor: {winnerActorNumber})");
         
-        // Here you would trigger blockchain settlement
+        // Trigger blockchain settlement
         TriggerBlockchainSettlement(winnerWallet);
     }
     
     void TriggerBlockchainSettlement(string winnerWallet)
     {
-        // This will be implemented later with your blockchain integration
-        Debug.Log($"Triggering blockchain settlement for winner: {winnerWallet}");
+        Debug.Log($"🎉 GAME WINNER: {winnerWallet}");
+        Debug.Log("Triggering blockchain payout...");
         
-        // For now, just log
         BlockchainManager blockchainManager = FindObjectOfType<BlockchainManager>();
         if (blockchainManager != null)
         {
-            // blockchainManager.SettleGame(winnerWallet);
+            StartCoroutine(TriggerPayoutCoroutine(blockchainManager, winnerWallet));
+        }
+        else
+        {
+            Debug.LogError("BlockchainManager not found! Winner payout cannot be processed.");
+        }
+    }
+    
+    System.Collections.IEnumerator TriggerPayoutCoroutine(BlockchainManager blockchainManager, string winnerWallet)
+    {
+        var task = blockchainManager.TriggerWinnerPayout(winnerWallet);
+        yield return new WaitUntil(() => task.IsCompleted);
+        
+        if (task.IsFaulted)
+        {
+            Debug.LogError("Blockchain payout failed: " + task.Exception?.GetBaseException().Message);
+        }
+        else
+        {
+            Debug.Log("Blockchain payout completed successfully!");
         }
     }
     
     void OnSubmitButtonClicked()
     {
         if (!roundInProgress || eliminatedPlayers.Contains(PhotonNetwork.LocalPlayer.ActorNumber))
+        {
+            if (resultText != null)
+                resultText.text = eliminatedPlayers.Contains(PhotonNetwork.LocalPlayer.ActorNumber) 
+                    ? "You are eliminated!" 
+                    : "Game is not active right now.";
             return;
+        }
             
         if (guessInput != null && !string.IsNullOrEmpty(guessInput.text))
         {
@@ -375,6 +533,17 @@ public class GameManager : MonoBehaviourPun
                         if (player.photonView.IsMine)
                         {
                             player.SubmitGuess(guess);
+                            
+                            // Show confirmation
+                            if (resultText != null)
+                                resultText.text = $"✅ Guess submitted: {guess}\nWaiting for other players...";
+                            
+                            // Disable input after submission
+                            if (guessInput != null)
+                                guessInput.interactable = false;
+                            if (submitButton != null)
+                                submitButton.interactable = false;
+                                
                             break;
                         }
                     }
@@ -382,15 +551,34 @@ public class GameManager : MonoBehaviourPun
                 else
                 {
                     if (resultText != null)
-                        resultText.text = "Invalid guess! Check the rules.";
+                        resultText.text = GetValidationMessage(guess);
                 }
             }
             else
             {
                 if (resultText != null)
-                    resultText.text = "Please enter a valid number.";
+                    resultText.text = "❌ Please enter a valid number.";
             }
         }
+        else
+        {
+            if (resultText != null)
+                resultText.text = "❌ Please enter a guess first.";
+        }
+    }
+    
+    string GetValidationMessage(int guess)
+    {
+        if (guess < 0 || guess > 100)
+            return "❌ Guess must be between 0-100!";
+            
+        if (currentRound == 2 && guess % 2 != 0)
+            return "❌ Round 2: Only even numbers allowed!";
+            
+        if (currentRound == 3 && guess % 10 == 0)
+            return "❌ Round 3: Numbers ending in 0 not allowed!";
+            
+        return "❌ Invalid guess! Check the rules.";
     }
     
     bool IsValidGuess(int guess)
@@ -416,6 +604,28 @@ public class GameManager : MonoBehaviourPun
     int GetActivePlayerCount()
     {
         return PhotonNetwork.CurrentRoom.PlayerCount - eliminatedPlayers.Count;
+    }
+    
+    string GetPlayerName(int actorNumber)
+    {
+        // Find player by actor number
+        foreach (var player in PhotonNetwork.CurrentRoom.Players.Values)
+        {
+            if (player.ActorNumber == actorNumber)
+            {
+                string nickname = player.NickName;
+                if (!string.IsNullOrEmpty(nickname))
+                {
+                    // Shorten long wallet addresses
+                    if (nickname.Length > 12)
+                        return nickname.Substring(0, 6) + "..." + nickname.Substring(nickname.Length - 4);
+                    else
+                        return nickname;
+                }
+                return $"Player {actorNumber}";
+            }
+        }
+        return $"Player {actorNumber}";
     }
     
     void UpdateRoundUI()

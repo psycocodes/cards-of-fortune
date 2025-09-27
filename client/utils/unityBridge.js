@@ -6,6 +6,7 @@ let signer = null;
 let contract = null;
 let unityGameObject = null;
 let unitySendMessage = null;
+let unityContextValid = true;
 
 // Contract configuration
 const CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || "0x6a821521b3C6a3E6298E222082c927bFdE0ddA38";
@@ -33,10 +34,37 @@ const CONTRACT_ABI = [
   }
 ];
 
+// Safe Unity message sender that checks context validity
+function safeSendToUnity(objectName, methodName, value = "") {
+  try {
+    if (!unityContextValid) {
+      console.warn(`Unity context invalid - cannot send message: ${objectName}.${methodName}(${value})`);
+      return false;
+    }
+    
+    if (!unitySendMessage || typeof unitySendMessage !== 'function') {
+      console.warn(`unitySendMessage not available - cannot send message: ${objectName}.${methodName}(${value})`);
+      return false;
+    }
+    
+    // Try to send the message with error catching
+    unitySendMessage(objectName, methodName, value);
+    return true;
+  } catch (error) {
+    console.error(`Failed to send Unity message ${objectName}.${methodName}:`, error);
+    // If this error suggests context loss, mark context as invalid
+    if (error.message && error.message.includes('view')) {
+      unityContextValid = false;
+    }
+    return false;
+  }
+}
+
 // Initialize the bridge
 export function initUnityBridge(gameObjectName = "BlockchainManager", walletInfo = null) {
   unityGameObject = gameObjectName;
   unitySendMessage = window.unitySendMessage;
+  unityContextValid = true; // Reset context validity
   
   // Store wallet information if provided
   if (walletInfo) {
@@ -91,7 +119,7 @@ async function initializeContractWithWallet(walletInfo) {
       
       // Send success to Unity
       if (unitySendMessage && unityGameObject) {
-        unitySendMessage(unityGameObject, "OnWalletConnected", walletInfo.walletAddress);
+        safeSendToUnity(unityGameObject, "OnWalletConnected", walletInfo.walletAddress);
       }
     } else {
       console.warn("No wallet client provided, transactions may not work");
@@ -99,7 +127,7 @@ async function initializeContractWithWallet(walletInfo) {
   } catch (error) {
     console.error("Failed to initialize contract:", error);
     if (unitySendMessage && unityGameObject) {
-      unitySendMessage(unityGameObject, "OnError", "Failed to initialize contract: " + error.message);
+      safeSendToUnity(unityGameObject, "OnError", "Failed to initialize contract: " + error.message);
     }
   }
 }
@@ -181,7 +209,7 @@ if (typeof window !== 'undefined') {
         
         // Send success callback to Unity
         if (unitySendMessage && unityGameObject) {
-          unitySendMessage(unityGameObject, "OnWalletConnected", address);
+          safeSendToUnity(unityGameObject, "OnWalletConnected", address);
         }
         
         return address;
@@ -203,7 +231,7 @@ if (typeof window !== 'undefined') {
       }
       
       if (unitySendMessage && unityGameObject) {
-        unitySendMessage(unityGameObject, "OnError", errorMessage);
+        safeSendToUnity(unityGameObject, "OnError", errorMessage);
       }
       
       throw new Error(errorMessage);
@@ -218,7 +246,7 @@ if (typeof window !== 'undefined') {
       const address = window.walletInfo.walletAddress;
       console.log("Using stored wallet address:", address);
       if (unitySendMessage && unityGameObject) {
-        unitySendMessage(unityGameObject, "OnWalletConnected", address);
+        safeSendToUnity(unityGameObject, "OnWalletConnected", address);
       }
       return address;
     }
@@ -227,7 +255,7 @@ if (typeof window !== 'undefined') {
     if (signer) {
       const address = await signer.getAddress();
       if (unitySendMessage && unityGameObject) {
-        unitySendMessage(unityGameObject, "OnWalletConnected", address);
+        safeSendToUnity(unityGameObject, "OnWalletConnected", address);
       }
       return address;
     } 
@@ -236,7 +264,7 @@ if (typeof window !== 'undefined') {
   } catch (error) {
     console.error("Get wallet address failed:", error);
     if (unitySendMessage && unityGameObject) {
-      unitySendMessage(unityGameObject, "OnError", error.message);
+      safeSendToUnity(unityGameObject, "OnError", error.message);
     }
     throw error;
   }
@@ -292,13 +320,13 @@ if (typeof window !== 'undefined') {
     
     // Send success callback to Unity
     if (unitySendMessage && unityGameObject) {
-      unitySendMessage(unityGameObject, "OnTxComplete", tx.hash);
+      safeSendToUnity(unityGameObject, "OnTxComplete", tx.hash);
     }
     
   } catch (error) {
     console.error("Transaction failed:", error);
     if (unitySendMessage && unityGameObject) {
-      unitySendMessage(unityGameObject, "OnError", error.message);
+      safeSendToUnity(unityGameObject, "OnError", error.message);
     }
   }
 };
@@ -330,13 +358,13 @@ if (typeof window !== 'undefined') {
     
     // Send result back to Unity
     if (unitySendMessage && unityGameObject) {
-      unitySendMessage(unityGameObject, "OnCallComplete", result.toString());
+      safeSendToUnity(unityGameObject, "OnCallComplete", result.toString());
     }
     
   } catch (error) {
     console.error("Contract call failed:", error);
     if (unitySendMessage && unityGameObject) {
-      unitySendMessage(unityGameObject, "OnError", error.message);
+      safeSendToUnity(unityGameObject, "OnError", error.message);
     }
   }
   };
@@ -347,20 +375,24 @@ if (typeof window !== 'undefined') {
       if (accounts.length === 0) {
         // User disconnected wallet
         if (unitySendMessage && unityGameObject) {
-          unitySendMessage(unityGameObject, "OnWalletDisconnected", "");
+          safeSendToUnity(unityGameObject, "OnWalletDisconnected", "");
         }
       } else {
         // User changed account
         if (unitySendMessage && unityGameObject) {
-          unitySendMessage(unityGameObject, "OnWalletConnected", accounts[0]);
+          safeSendToUnity(unityGameObject, "OnWalletConnected", accounts[0]);
         }
       }
     });
 
     window.ethereum.on('chainChanged', (chainId) => {
       console.log("Chain changed to:", chainId);
+      // Mark context as potentially invalid on chain change
+      unityContextValid = false;
       // Reload the page when chain changes to reset the provider
-      window.location.reload();
+      setTimeout(() => {
+        window.location.reload();
+      }, 1000);
     });
   }
 

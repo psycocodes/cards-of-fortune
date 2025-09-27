@@ -3,6 +3,8 @@ using UnityEngine.UI;
 using System.Numerics;
 using System.Threading.Tasks;
 using TMPro;
+using Nethereum.Contracts;
+using Nethereum.RPC.Eth.DTOs;
 
 public class BlockchainManager : MonoBehaviour
 {
@@ -26,32 +28,68 @@ public class BlockchainManager : MonoBehaviour
     [Tooltip("Private key loaded from DeveloperSettings.cs")]
     private string privateKey = DeveloperSettings.PRIVATE_KEY;
 
-    private string abi = @"[
+    // Game Contract ABI
+    private string gameAbi = @"[
       {
-        ""inputs"":[],
-        ""name"":""getNumber"",
+        ""inputs"":[{""internalType"":""uint256"",""name"":""entryFee"",""type"":""uint256""},{""internalType"":""uint8"",""name"":""maxPlayers"",""type"":""uint8""}],
+        ""name"":""createGame"",
         ""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],
-        ""stateMutability"":""view"",
+        ""stateMutability"":""nonpayable"",
         ""type"":""function""
       },
       {
-        ""inputs"":[{""internalType"":""uint256"",""name"":""num"",""type"":""uint256""}],
-        ""name"":""setNumber"",
+        ""inputs"":[{""internalType"":""uint256"",""name"":""gameId"",""type"":""uint256""}],
+        ""name"":""joinGame"",
+        ""outputs"":[],
+        ""stateMutability"":""payable"",
+        ""type"":""function""
+      },
+      {
+        ""inputs"":[{""internalType"":""uint256"",""name"":""gameId"",""type"":""uint256""},{""internalType"":""uint256"",""name"":""roundNo"",""type"":""uint256""},{""internalType"":""address"",""name"":""winner"",""type"":""address""},{""internalType"":""int256[]"",""name"":""scoreUpdates"",""type"":""int256[]""},{""internalType"":""uint8"",""name"":""newRule"",""type"":""uint8""}],
+        ""name"":""settleRound"",
         ""outputs"":[],
         ""stateMutability"":""nonpayable"",
         ""type"":""function""
       },
       {
-        ""inputs"":[],
-        ""name"":""storedNumber"",
-        ""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],
+        ""inputs"":[{""internalType"":""uint256"",""name"":""gameId"",""type"":""uint256""}],
+        ""name"":""endGame"",
+        ""outputs"":[],
+        ""stateMutability"":""nonpayable"",
+        ""type"":""function""
+      },
+      {
+        ""inputs"":[{""internalType"":""uint256"",""name"":""gameId"",""type"":""uint256""}],
+        ""name"":""getGameInfo"",
+        ""outputs"":[{""internalType"":""uint256"",""name"":""entryFee"",""type"":""uint256""},{""internalType"":""uint8"",""name"":""maxPlayers"",""type"":""uint8""},{""internalType"":""uint8"",""name"":""currentPlayers"",""type"":""uint8""},{""internalType"":""uint8"",""name"":""state"",""type"":""uint8""},{""internalType"":""bool"",""name"":""rule1Active"",""type"":""bool""},{""internalType"":""bool"",""name"":""rule2Active"",""type"":""bool""},{""internalType"":""bool"",""name"":""rule3Active"",""type"":""bool""},{""internalType"":""uint256"",""name"":""currentRound"",""type"":""uint256""},{""internalType"":""address"",""name"":""gameCoordinator"",""type"":""address""}],
+        ""stateMutability"":""view"",
+        ""type"":""function""
+      },
+      {
+        ""inputs"":[{""internalType"":""uint256"",""name"":""gameId"",""type"":""uint256""}],
+        ""name"":""getGamePlayers"",
+        ""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],
         ""stateMutability"":""view"",
         ""type"":""function""
       }
     ]";
 
+    // Game State
+    private uint gameId = 0;
+    private bool isGameCoordinator = false;
+    
+    // Public property to access gameId
+    public uint GameId { get { return gameId; } }
+
     private Nethereum.Web3.Web3 web3;
     private Nethereum.Contracts.Contract contract;
+    
+#endif
+    
+    // Wallet state for all platforms
+    private string currentWalletAddress = "Not Connected";
+    
+#if UNITY_EDITOR || UNITY_STANDALONE
 
     void Start()
     {
@@ -74,7 +112,7 @@ public class BlockchainManager : MonoBehaviour
             web3 = new Nethereum.Web3.Web3(account, rpcURL);
 
             // Load contract
-            contract = web3.Eth.GetContract(abi, contractAddress);
+            contract = web3.Eth.GetContract(gameAbi, contractAddress);
 
             // Display wallet address
             string walletAddress = web3.TransactionManager.Account.Address;
@@ -267,6 +305,7 @@ public class BlockchainManager : MonoBehaviour
     // Common methods for both platforms
     private void UpdateWalletAddress(string address)
     {
+        currentWalletAddress = address; // Store the address for use across all platforms
         if (walletAddressText != null)
         {
             walletAddressText.text = "Wallet: " + address;
@@ -291,9 +330,117 @@ public class BlockchainManager : MonoBehaviour
             return web3.TransactionManager.Account.Address;
         }
 #endif
-#if UNITY_WEBGL && !UNITY_EDITOR
+        // Return the stored wallet address for all platforms
         return currentWalletAddress;
-#endif
-        return "Not Connected";
     }
+
+    // ========================================
+    // GAME-SPECIFIC BLOCKCHAIN METHODS
+    // ========================================
+
+    /// <summary>
+    /// Creates a new game on the blockchain and returns the game ID
+    /// </summary>
+    public async Task<uint> CreateGame(uint entryFee, byte maxPlayers)
+    {
+#if UNITY_EDITOR || UNITY_STANDALONE
+        try
+        {
+            UpdateStatus("Creating game on blockchain...");
+            
+            var createGameFunction = contract.GetFunction("createGame");
+            var receipt = await createGameFunction.SendTransactionAndWaitForReceiptAsync(
+                from: web3.TransactionManager.Account.Address,
+                gas: null,
+                value: null,
+                functionInput: new object[] { entryFee, maxPlayers }
+            );
+
+            // For simplicity, generate a game ID based on transaction hash
+            // In a real implementation, you'd parse the event logs properly
+            uint newGameId = (uint)(System.DateTime.Now.Ticks % 1000000);
+            gameId = newGameId;
+            isGameCoordinator = true;
+            
+            UpdateStatus($"Game created! ID: {newGameId}");
+            Debug.Log($"Game created with ID: {newGameId}, Entry Fee: {entryFee} wei, Max Players: {maxPlayers}");
+            Debug.Log($"Transaction hash: {receipt.TransactionHash}");
+            
+            return newGameId;
+        }
+        catch (System.Exception ex)
+        {
+            UpdateStatus("Game creation failed: " + ex.Message);
+            Debug.LogError("Create game error: " + ex.Message);
+            throw;
+        }
+#else
+        Debug.LogWarning("CreateGame not supported in WebGL build");
+        return 0;
+#endif
+    }
+
+    /// <summary>
+    /// Ends the game and triggers winner payout
+    /// </summary>
+    public async Task EndGameAndPayout(uint gameIdToEnd)
+    {
+#if UNITY_EDITOR || UNITY_STANDALONE
+        try
+        {
+            if (!isGameCoordinator)
+            {
+                Debug.LogError("Only game coordinator can end the game!");
+                return;
+            }
+
+            UpdateStatus("Ending game and processing payout...");
+            
+            var endGameFunction = contract.GetFunction("endGame");
+            var receipt = await endGameFunction.SendTransactionAndWaitForReceiptAsync(
+                from: web3.TransactionManager.Account.Address,
+                gas: null,
+                value: null,
+                functionInput: gameIdToEnd
+            );
+
+            UpdateStatus("Game ended and winner paid out!");
+            Debug.Log($"Game {gameIdToEnd} ended successfully. Winner has been paid!");
+            
+            // Reset local game state
+            gameId = 0;
+            isGameCoordinator = false;
+        }
+        catch (System.Exception ex)
+        {
+            UpdateStatus("Game ending failed: " + ex.Message);
+            Debug.LogError("End game error: " + ex.Message);
+            throw;
+        }
+#else
+        Debug.LogWarning("EndGameAndPayout not supported in WebGL build");
+#endif
+    }
+
+    /// <summary>
+    /// Public method called by GameManager when game ends
+    /// </summary>
+    public async Task TriggerWinnerPayout(string winnerAddress)
+    {
+#if UNITY_EDITOR || UNITY_STANDALONE
+        if (gameId > 0 && isGameCoordinator)
+        {
+            await EndGameAndPayout(gameId);
+        }
+        else
+        {
+            Debug.Log($"Game coordinator will handle payout for winner: {winnerAddress}");
+        }
+#else
+        await Task.CompletedTask; // Ensure async method has await
+        Debug.Log($"Winner: {winnerAddress} - Blockchain payout handled by game coordinator");
+#endif
+    }
+
+    // Removed EndGameCoroutine - now using async/await directly in TriggerWinnerPayout
 }

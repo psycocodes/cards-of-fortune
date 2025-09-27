@@ -16,9 +16,9 @@ export default function GameWrapper({ gameId }: { gameId: string }) {
   
   const unityContextConfig = {
     loaderUrl: `/games/${gameId}/Build/${gameId}.loader.js`,
-    dataUrl: `/games/${gameId}/Build/${gameId}.data.br`,
-    frameworkUrl: `/games/${gameId}/Build/${gameId}.framework.js.br`,
-    codeUrl: `/games/${gameId}/Build/${gameId}.wasm.br`,
+    dataUrl: `/games/${gameId}/Build/${gameId}.data`,
+    frameworkUrl: `/games/${gameId}/Build/${gameId}.framework.js`,
+    codeUrl: `/games/${gameId}/Build/${gameId}.wasm`,
   };
   
   console.log("Unity context config:", unityContextConfig);
@@ -30,8 +30,41 @@ export default function GameWrapper({ gameId }: { gameId: string }) {
     loadingProgression, 
     sendMessage,
     addEventListener,
-    removeEventListener
+    removeEventListener,
+    unload
   } = useUnityContext(unityContextConfig);
+
+  // Safe Unity message sending wrapper with better error handling
+  const safeSendMessage = React.useCallback((objectName: string, methodName: string, value: string = "") => {
+    try {
+      if (!isLoaded) {
+        console.warn(`Cannot send message to Unity - not loaded yet. Message: ${objectName}.${methodName}(${value})`);
+        return false;
+      }
+      
+      // Check if we're in a valid state
+      if (typeof sendMessage !== 'function') {
+        console.error('sendMessage is not a function - Unity context may be corrupted');
+        return false;
+      }
+      
+      console.log(`Sending Unity message: ${objectName}.${methodName}(${value})`);
+      sendMessage(objectName, methodName, value);
+      return true;
+    } catch (error) {
+      console.error(`Failed to send Unity message ${objectName}.${methodName}:`, error);
+      
+      // Check if this is a WebGL context error
+      if (error instanceof Error && error.message.includes('view')) {
+        console.error('WebGL context lost - attempting page reload');
+        setTimeout(() => {
+          window.location.reload();
+        }, 2000);
+      }
+      
+      return false;
+    }
+  }, [isLoaded, sendMessage]);
 
   // Initialize Unity bridge when Unity is loaded
   useEffect(() => {
@@ -52,8 +85,8 @@ export default function GameWrapper({ gameId }: { gameId: string }) {
           chainName: chain?.name
         });
         
-        // Make sendMessage function globally available for the bridge
-        (window as any).unitySendMessage = sendMessage;
+        // Make SAFE sendMessage function globally available for the bridge
+        (window as any).unitySendMessage = safeSendMessage;
         
         // Load ethers.js if not already loaded
         if (typeof (window as any).ethers === 'undefined') {
@@ -83,18 +116,46 @@ export default function GameWrapper({ gameId }: { gameId: string }) {
         } as any);
         console.log("Unity bridge initialized for game:", gameId);
         
-        // Send wallet information to Unity
+        // Send wallet information to Unity with safety checks
         setTimeout(() => {
           try {
             console.log("Sending wallet address to Unity:", address);
-            sendMessage("BlockchainManager", "SetWalletAddress", address);
+            const addressSent = safeSendMessage("BlockchainManager", "SetWalletAddress", address);
             
-            // Initialize blockchain in Unity (this should not request wallet connection)
-            sendMessage("BlockchainManager", "InitializeBlockchain", "");
+            if (addressSent) {
+              // Initialize blockchain in Unity only if address was sent successfully
+              setTimeout(() => {
+                safeSendMessage("BlockchainManager", "InitializeBlockchain", "");
+              }, 100);
+            } else {
+              console.error("Failed to send wallet address - skipping blockchain initialization");
+            }
           } catch (error) {
             console.error("Failed to send wallet info to Unity:", error);
           }
         }, 500);
+
+        // Also send player info to PlayerController with retries
+        setTimeout(() => {
+          const sendPlayerInfo = (attempts: number = 3) => {
+            if (attempts <= 0) {
+              console.error("Failed to send player info after multiple attempts");
+              return;
+            }
+
+            console.log(`Sending player info to Unity (attempt ${4 - attempts}):`, address);
+            const playerInfoSent = safeSendMessage("PlayerController", "SetPlayerInfo", address);
+            
+            if (!playerInfoSent) {
+              console.warn(`Player info send failed, retrying in 1 second... (${attempts - 1} attempts left)`);
+              setTimeout(() => sendPlayerInfo(attempts - 1), 1000);
+            } else {
+              console.log("Player info sent successfully to Unity");
+            }
+          };
+
+          sendPlayerInfo();
+        }, 1000);
         
         // Force Unity to refresh its canvas size
         setTimeout(() => {
@@ -104,7 +165,56 @@ export default function GameWrapper({ gameId }: { gameId: string }) {
     };
     
     initializeBridge();
-  }, [isLoaded, sendMessage, gameId, address, isConnected, chain, walletClient]);
+  }, [isLoaded, safeSendMessage, gameId, address, isConnected, chain, walletClient]);
+
+  // Handle component cleanup to prevent WebGL context issues
+  useEffect(() => {
+    return () => {
+      // Cleanup Unity instance when component unmounts
+      console.log('GameWrapper unmounting - cleaning up Unity instance');
+      try {
+        if (typeof unload === 'function') {
+          unload();
+        }
+      } catch (error) {
+        console.error('Error during Unity cleanup:', error);
+      }
+    };
+  }, [unload]);
+
+  // Monitor WebGL context and handle context loss
+  useEffect(() => {
+    if (!isLoaded) return;
+
+    const handleContextLost = (event: Event) => {
+      console.error('WebGL context lost!');
+      event.preventDefault();
+      // Show user-friendly error
+      const errorDiv = document.createElement('div');
+      errorDiv.innerHTML = '<strong>Graphics Error:</strong> The game needs to reload due to graphics driver issues.';
+      errorDiv.style.cssText = 'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: orange; color: black; padding: 20px; border-radius: 8px; z-index: 9999;';
+      document.body.appendChild(errorDiv);
+      
+      setTimeout(() => {
+        window.location.reload();
+      }, 3000);
+    };
+
+    const handleContextRestored = (event: Event) => {
+      console.log('WebGL context restored');
+    };
+
+    const canvas = document.querySelector('#unity-canvas') as HTMLCanvasElement;
+    if (canvas) {
+      canvas.addEventListener('webglcontextlost', handleContextLost);
+      canvas.addEventListener('webglcontextrestored', handleContextRestored);
+      
+      return () => {
+        canvas.removeEventListener('webglcontextlost', handleContextLost);
+        canvas.removeEventListener('webglcontextrestored', handleContextRestored);
+      };
+    }
+  }, [isLoaded]);
 
   // Add error handling
   useEffect(() => {
@@ -147,9 +257,9 @@ export default function GameWrapper({ gameId }: { gameId: string }) {
     const checkFiles = async () => {
       const files = [
         `/games/${gameId}/Build/${gameId}.loader.js`,
-        `/games/${gameId}/Build/${gameId}.data.br`,
-        `/games/${gameId}/Build/${gameId}.framework.js.br`,
-        `/games/${gameId}/Build/${gameId}.wasm.br`
+        `/games/${gameId}/Build/${gameId}.data`,
+        `/games/${gameId}/Build/${gameId}.framework.js`,
+        `/games/${gameId}/Build/${gameId}.wasm`
       ];
       
       console.log("Checking Unity build files...");
@@ -202,6 +312,7 @@ export default function GameWrapper({ gameId }: { gameId: string }) {
         <Unity
           unityProvider={unityProvider}
           className="w-full h-full"
+          id="unity-canvas"
           style={{
             width: '100%',
             height: '100%',
