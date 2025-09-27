@@ -281,4 +281,19 @@ public class BlockchainManager : MonoBehaviour
         }
         Debug.Log("Status: " + status);
     }
+    
+    // Public method to get wallet address for other scripts
+    public string GetWalletAddress()
+    {
+#if UNITY_EDITOR || UNITY_STANDALONE
+        if (web3?.TransactionManager?.Account?.Address != null)
+        {
+            return web3.TransactionManager.Account.Address;
+        }
+#endif
+#if UNITY_WEBGL && !UNITY_EDITOR
+        return currentWalletAddress;
+#endif
+        return "Not Connected";
+    }
 }
